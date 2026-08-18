@@ -151,14 +151,23 @@ io.on('connection', async (socket) => {
   const venueId = socket.data.venueId as string;
   socket.join(`venue:${venueId}`);
   if (socket.handshake.auth?.screenKey) {
+    socket.data.isScreen = true;
     socket.join(`screen:${venueId}`);
     await redis.hSet(`screen:${venueId}`, { socketId: socket.id, lastSeenAt: new Date().toISOString(), status: 'online' });
     await redis.expire(`screen:${venueId}`, 45);
     io.to(`venue:${venueId}`).emit('screen:status', { status: 'online' });
+  } else {
+    const activeRound = await redis.get(`round:${venueId}`);
+    if (activeRound) socket.emit('game:state', JSON.parse(activeRound));
   }
   socket.on('screen:heartbeat', async (payload = {}) => {
     await redis.hSet(`screen:${venueId}`, { socketId: socket.id, lastSeenAt: new Date().toISOString(), status: 'online', currentGame: String(payload.currentGame ?? '') });
     await redis.expire(`screen:${venueId}`, 45);
+  });
+  socket.on('game:state', async (payload) => {
+    if (!socket.data.isScreen || !payload?.roundId || !payload?.gameId) return;
+    await redis.set(`round:${venueId}`, JSON.stringify(payload), { EX: 120 });
+    socket.to(`venue:${venueId}`).emit('game:state', payload);
   });
   socket.on('game:input', (payload) => io.to(`screen:${venueId}`).emit('game:input', { ...payload, receivedAt: Date.now() }));
   socket.on('disconnect', () => io.to(`venue:${venueId}`).emit('screen:status', { status: 'offline' }));
