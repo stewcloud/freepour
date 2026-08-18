@@ -22,7 +22,7 @@ This repository is an MVP foundation. It includes an operational API and UI shel
 5. Apply the initial migration from a trusted shell with `DATABASE_URL` set: `node scripts/migrate.mjs`.
 6. Visit `http://localhost:3000`; API health is at `http://localhost:4000/health`.
 
-The Compose file publishes the web UI on port 3000 and API on port 4000 by default. Put both behind a TLS reverse proxy for production and expose only the web proxy publicly after consolidating routing.
+The Compose file publishes the web UI on `WEB_PORT` 3000 and API on `API_HOST_PORT` 4000 by default. The API always listens on port 4000 inside the Compose network. Put both behind a TLS reverse proxy for production and expose only the web proxy publicly after consolidating routing.
 
 ## Repository layout
 

@@ -34,6 +34,7 @@ services:
     restart: unless-stopped
     env_file: .env
     environment:
+      API_PORT: 4000
       DATABASE_URL: postgresql://${POSTGRES_USER:-freepour}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-freepour}
       REDIS_URL: redis://redis:6379
     depends_on:
@@ -42,7 +43,7 @@ services:
     volumes:
       - ${APPDATA_PATH:-./appdata}/uploads:/app/appdata/uploads
     ports:
-      - "${API_PORT:-4000}:4000"
+      - "${API_HOST_PORT:-4000}:4000"
 
   web:
     build:
@@ -52,4 +53,3 @@ services:
     depends_on: [api]
     ports:
       - "${WEB_PORT:-3000}:80"
-
