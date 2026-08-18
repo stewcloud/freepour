@@ -30,12 +30,34 @@ const auth: express.RequestHandler = (req, res, next) => {
   try { res.locals.user = jwt.verify(token ?? '', jwtSecret) as Claims; next(); }
   catch { res.status(401).json({ error: 'unauthorized' }); }
 };
+const platformAdmin: express.RequestHandler = (req, res, next) => {
+  const claims = res.locals.user as Claims;
+  if (claims.role !== 'platform_admin') return res.status(403).json({ error: 'platform_admin_required' });
+  next();
+};
 
 app.get('/health', async (_req, res) => {
   const db = await pool.query('select now() as now');
   res.json({ ok: true, brand: process.env.APP_NAME ?? 'FreePour', database: db.rows[0].now, redis: redis.isReady });
 });
 app.get('/api/games', (_req, res) => res.json(gameCatalog));
+
+app.get('/api/setup/status', async (_req, res) => {
+  const result = await pool.query('select exists(select 1 from users where active=true) as configured');
+  res.json({ configured: result.rows[0].configured });
+});
+
+app.post('/api/setup/bootstrap', async (req, res) => {
+  const input = z.object({ email: z.string().email(), password: z.string().min(12).max(128) }).safeParse(req.body);
+  if (!input.success) return res.status(400).json({ error: 'invalid_setup', details: input.error.flatten() });
+  const existing = await pool.query('select exists(select 1 from users) as configured');
+  if (existing.rows[0].configured) return res.status(409).json({ error: 'already_configured' });
+  const passwordHash = await bcrypt.hash(input.data.password, 12);
+  const created = await pool.query(`insert into users(email,password_hash,role) values($1,$2,'platform_admin') returning id,email,role`, [input.data.email, passwordHash]);
+  const user = created.rows[0];
+  const token = jwt.sign({ sub: user.id, role: user.role }, jwtSecret, { expiresIn: '12h' });
+  res.status(201).json({ token, user });
+});
 
 app.post('/api/auth/login', async (req, res) => {
   const input = z.object({ email: z.string().email(), password: z.string().min(8) }).safeParse(req.body);
@@ -45,6 +67,46 @@ app.post('/api/auth/login', async (req, res) => {
   if (!user || !(await bcrypt.compare(input.data.password, user.password_hash))) return res.status(401).json({ error: 'invalid_credentials' });
   const token = jwt.sign({ sub: user.id, role: user.role, venueId: user.venue_id }, jwtSecret, { expiresIn: '12h' });
   res.json({ token, user: { email: user.email, role: user.role, venueId: user.venue_id } });
+});
+
+app.get('/api/admin/venues', auth, platformAdmin, async (_req, res) => {
+  const result = await pool.query(`select v.id,v.name,v.slug,v.timezone,v.active,v.prizes_enabled,v.created_at,
+    (select count(*)::int from player_sessions ps where ps.venue_id=v.id) as player_count,
+    coalesce((select json_agg(json_build_object('gameId',vg.game_id,'enabled',vg.enabled,'position',vg.rotation_position,'config',vg.config)
+      order by vg.rotation_position) from venue_games vg where vg.venue_id=v.id),'[]') games
+    from venues v order by v.created_at desc`);
+  res.json(result.rows);
+});
+
+app.post('/api/admin/venues', auth, platformAdmin, async (req, res) => {
+  const input = z.object({
+    name: z.string().trim().min(2).max(80),
+    slug: z.string().trim().min(2).max(48).regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/),
+    timezone: z.string().trim().min(3).max(80).default('America/Los_Angeles')
+  }).safeParse(req.body);
+  if (!input.success) return res.status(400).json({ error: 'invalid_venue', details: input.error.flatten() });
+  const client = await pool.connect();
+  try {
+    await client.query('begin');
+    const created = await client.query('insert into venues(name,slug,timezone) values($1,$2,$3) returning *', [input.data.name, input.data.slug, input.data.timezone]);
+    for (const [position, game] of gameCatalog.entries()) {
+      await client.query('insert into venue_games(venue_id,game_id,enabled,rotation_position,config) values($1,$2,true,$3,$4)', [created.rows[0].id, game.id, position, game.defaultConfig]);
+    }
+    await client.query('commit');
+    res.status(201).json(created.rows[0]);
+  } catch (error: any) {
+    await client.query('rollback');
+    if (error?.code === '23505') return res.status(409).json({ error: 'slug_in_use' });
+    throw error;
+  } finally { client.release(); }
+});
+
+app.put('/api/admin/venues/:venueId', auth, platformAdmin, async (req, res) => {
+  const input = z.object({ name: z.string().trim().min(2).max(80), timezone: z.string().trim().min(3).max(80), active: z.boolean() }).safeParse(req.body);
+  if (!input.success) return res.status(400).json({ error: 'invalid_venue' });
+  const updated = await pool.query('update venues set name=$1,timezone=$2,active=$3,updated_at=now() where id=$4 returning *', [input.data.name, input.data.timezone, input.data.active, req.params.venueId]);
+  if (!updated.rows[0]) return res.status(404).json({ error: 'venue_not_found' });
+  res.json(updated.rows[0]);
 });
 
 app.get('/api/venues/:slug/config', async (req, res) => {
@@ -106,4 +168,3 @@ app.use((error: unknown, _req: express.Request, res: express.Response, _next: ex
   console.error(error); res.status(500).json({ error: 'internal_error' });
 });
 server.listen(port, () => console.log(`FreePour API listening on ${port}`));
-
