@@ -1,0 +1,14 @@
+create table if not exists venue_categories (venue_id uuid not null references venues(id) on delete cascade, category_id text not null check(category_id in ('trivia','skill','carnival')), enabled boolean not null default true, rotation_position integer not null default 0, game_count integer not null default 3 check(game_count between 1 and 20), weight integer not null default 1 check(weight between 1 and 10), primary key(venue_id,category_id));
+alter table venue_games add column if not exists weight integer not null default 1 check(weight between 1 and 10);
+alter table game_sessions add column if not exists category_id text;
+alter table game_sessions add column if not exists category_round_id uuid;
+alter table game_sessions add column if not exists phase text not null default 'play';
+alter table game_entries add column if not exists username varchar(24);
+create index if not exists game_entries_player_score on game_entries(player_session_id,score desc);
+insert into venue_categories(venue_id,category_id,enabled,rotation_position,game_count,weight) select id,'trivia',true,0,5,1 from venues on conflict do nothing;
+insert into venue_categories(venue_id,category_id,enabled,rotation_position,game_count,weight) select id,'skill',true,1,3,1 from venues on conflict do nothing;
+insert into venue_categories(venue_id,category_id,enabled,rotation_position,game_count,weight) select id,'carnival',true,2,3,1 from venues on conflict do nothing;
+insert into campaigns(venue_id,name,status,starts_at,weight) select id,'Tonight at FreePour','active',now(),2 from venues where slug='demo' and not exists(select 1 from campaigns where name='Tonight at FreePour');
+insert into campaigns(venue_id,name,status,starts_at,weight) select id,'House Special','active',now(),1 from venues where slug='demo' and not exists(select 1 from campaigns where name='House Special');
+insert into campaign_creatives(campaign_id,kind,asset_url,duration_seconds) select id,'html','FreePour turns any screen into game night. Scan · Play · Win.',10 from campaigns where name='Tonight at FreePour' and not exists(select 1 from campaign_creatives where campaign_id=campaigns.id);
+insert into campaign_creatives(campaign_id,kind,asset_url,duration_seconds) select id,'html','Ask about tonight’s house special — available at the bar.',10 from campaigns where name='House Special' and not exists(select 1 from campaign_creatives where campaign_id=campaigns.id);

@@ -8,7 +8,7 @@ import { Pool } from 'pg';
 import { createClient } from 'redis';
 import { Server } from 'socket.io';
 import { z } from 'zod';
-import { gameCatalog } from '@freepour/games';
+import { categories, gameCatalog, plinkoPath, scoreGame } from '@freepour/games';
 
 const port = Number(process.env.API_PORT ?? 4000);
 const jwtSecret = process.env.JWT_SECRET;
@@ -72,8 +72,8 @@ app.post('/api/auth/login', async (req, res) => {
 app.get('/api/admin/venues', auth, platformAdmin, async (_req, res) => {
   const result = await pool.query(`select v.id,v.name,v.slug,v.timezone,v.active,v.prizes_enabled,v.created_at,
     (select count(*)::int from player_sessions ps where ps.venue_id=v.id) as player_count,
-    coalesce((select json_agg(json_build_object('gameId',vg.game_id,'enabled',vg.enabled,'position',vg.rotation_position,'config',vg.config)
-      order by vg.rotation_position) from venue_games vg where vg.venue_id=v.id),'[]') games
+    coalesce((select json_agg(json_build_object('gameId',vg.game_id,'enabled',vg.enabled,'position',vg.rotation_position,'config',vg.config,'weight',vg.weight) order by vg.rotation_position) from venue_games vg where vg.venue_id=v.id),'[]') games,
+    coalesce((select json_agg(json_build_object('categoryId',vc.category_id,'enabled',vc.enabled,'position',vc.rotation_position,'gameCount',vc.game_count,'weight',vc.weight) order by vc.rotation_position) from venue_categories vc where vc.venue_id=v.id),'[]') categories
     from venues v order by v.created_at desc`);
   res.json(result.rows);
 });
@@ -90,8 +90,9 @@ app.post('/api/admin/venues', auth, platformAdmin, async (req, res) => {
     await client.query('begin');
     const created = await client.query('insert into venues(name,slug,timezone) values($1,$2,$3) returning *', [input.data.name, input.data.slug, input.data.timezone]);
     for (const [position, game] of gameCatalog.entries()) {
-      await client.query('insert into venue_games(venue_id,game_id,enabled,rotation_position,config) values($1,$2,true,$3,$4)', [created.rows[0].id, game.id, position, game.defaultConfig]);
+      await client.query('insert into venue_games(venue_id,game_id,enabled,rotation_position,config,weight) values($1,$2,true,$3,$4,1)', [created.rows[0].id, game.id, position, game.defaultConfig]);
     }
+    for (const [position, category] of categories.entries()) await client.query('insert into venue_categories(venue_id,category_id,rotation_position,game_count) values($1,$2,$3,$4)', [created.rows[0].id, category.id, position, category.defaultGameCount]);
     await client.query('commit');
     res.status(201).json(created.rows[0]);
   } catch (error: any) {
@@ -111,8 +112,10 @@ app.put('/api/admin/venues/:venueId', auth, platformAdmin, async (req, res) => {
 
 app.get('/api/venues/:slug/config', async (req, res) => {
   const result = await pool.query(`select v.id, v.name, v.slug, v.timezone, v.prizes_enabled,
-    coalesce(json_agg(json_build_object('gameId', vg.game_id, 'enabled', vg.enabled, 'position', vg.rotation_position, 'config', vg.config)
-      order by vg.rotation_position) filter (where vg.game_id is not null), '[]') games
+    coalesce(json_agg(json_build_object('gameId', vg.game_id, 'enabled', vg.enabled, 'position', vg.rotation_position, 'config', vg.config, 'weight',vg.weight)
+      order by vg.rotation_position) filter (where vg.game_id is not null), '[]') games,
+    coalesce((select json_agg(json_build_object('categoryId',vc.category_id,'enabled',vc.enabled,'position',vc.rotation_position,'gameCount',vc.game_count,'weight',vc.weight) order by vc.rotation_position) from venue_categories vc where vc.venue_id=v.id),'[]') categories,
+    coalesce((select json_agg(json_build_object('name',c.name,'message',cc.asset_url,'durationSeconds',cc.duration_seconds) order by c.weight desc) from campaigns c join campaign_creatives cc on cc.campaign_id=c.id where (c.venue_id=v.id or c.venue_id is null) and c.status='active' and cc.active=true and (c.starts_at is null or c.starts_at<=now()) and (c.ends_at is null or c.ends_at>now())),'[]') ads
     from venues v left join venue_games vg on vg.venue_id=v.id where v.slug=$1 and v.active=true group by v.id`, [req.params.slug]);
   if (!result.rows[0]) return res.status(404).json({ error: 'venue_not_found' });
   res.json(result.rows[0]);
@@ -121,17 +124,28 @@ app.get('/api/venues/:slug/config', async (req, res) => {
 app.put('/api/venues/:venueId/games', auth, async (req, res) => {
   const claims = res.locals.user as Claims;
   if (claims.role !== 'platform_admin' && claims.venueId !== req.params.venueId) return res.status(403).json({ error: 'forbidden' });
-  const input = z.array(z.object({ gameId: z.string(), enabled: z.boolean(), position: z.number().int().min(0), config: z.record(z.string(), z.unknown()).default({}) })).parse(req.body);
+  const input = z.array(z.object({ gameId: z.string(), enabled: z.boolean(), position: z.number().int().min(0), weight: z.number().int().min(1).max(10).default(1), config: z.record(z.string(), z.unknown()).default({}) })).parse(req.body);
   const client = await pool.connect();
   try {
     await client.query('begin');
-    for (const item of input) await client.query(`insert into venue_games(venue_id,game_id,enabled,rotation_position,config) values($1,$2,$3,$4,$5)
-      on conflict(venue_id,game_id) do update set enabled=$3,rotation_position=$4,config=$5,updated_at=now()`, [req.params.venueId, item.gameId, item.enabled, item.position, item.config]);
+    for (const item of input) await client.query(`insert into venue_games(venue_id,game_id,enabled,rotation_position,config,weight) values($1,$2,$3,$4,$5,$6)
+      on conflict(venue_id,game_id) do update set enabled=$3,rotation_position=$4,config=$5,weight=$6,updated_at=now()`, [req.params.venueId, item.gameId, item.enabled, item.position, item.config, item.weight]);
     await client.query('commit');
     io.to(`venue:${req.params.venueId}`).emit('venue:config-updated');
     res.status(204).end();
   } catch (error) { await client.query('rollback'); throw error; } finally { client.release(); }
 });
+
+app.put('/api/venues/:venueId/categories', auth, async (req, res) => {
+  const claims=res.locals.user as Claims; if(claims.role!=='platform_admin'&&claims.venueId!==req.params.venueId) return res.status(403).json({error:'forbidden'});
+  const input=z.array(z.object({categoryId:z.enum(['trivia','skill','carnival']),enabled:z.boolean(),position:z.number().int().min(0),gameCount:z.number().int().min(1).max(20),weight:z.number().int().min(1).max(10)})).parse(req.body);
+  for(const item of input) await pool.query(`insert into venue_categories(venue_id,category_id,enabled,rotation_position,game_count,weight) values($1,$2,$3,$4,$5,$6) on conflict(venue_id,category_id) do update set enabled=$3,rotation_position=$4,game_count=$5,weight=$6`,[req.params.venueId,item.categoryId,item.enabled,item.position,item.gameCount,item.weight]);
+  io.to(`venue:${req.params.venueId}`).emit('venue:config-updated'); res.status(204).end();
+});
+
+app.get('/api/venues/:slug/leaderboard', async (req,res)=>{ const result=await pool.query(`select coalesce(ge.username,ps.username) username,sum(ge.score)::int score,count(*)::int games from game_entries ge join game_sessions gs on gs.id=ge.game_session_id join venues v on v.id=gs.venue_id left join player_sessions ps on ps.id=ge.player_session_id where v.slug=$1 and gs.created_at>=date_trunc('day',now() at time zone v.timezone) at time zone v.timezone group by coalesce(ge.username,ps.username) order by score desc limit 10`,[req.params.slug]); res.json(result.rows); });
+
+app.get('/api/admin/venues/:venueId/screen',auth,async(req,res)=>{ const data=await redis.hGetAll(`screen:${req.params.venueId}`); res.json({status:Object.keys(data).length?'online':'offline',...data}); });
 
 app.post('/api/player/session', async (req, res) => {
   const input = z.object({ venueSlug: z.string(), username: z.string().trim().min(2).max(24).regex(/^[\w -]+$/) }).safeParse(req.body);
@@ -149,6 +163,8 @@ io.use((socket, next) => {
 });
 io.on('connection', async (socket) => {
   const venueId = socket.data.venueId as string;
+  const venueRecord = await pool.query('select id from venues where id::text=$1 or slug=$1', [venueId]);
+  const venueDbId = venueRecord.rows[0]?.id as string | undefined;
   socket.join(`venue:${venueId}`);
   if (socket.handshake.auth?.screenKey) {
     socket.data.isScreen = true;
@@ -161,15 +177,19 @@ io.on('connection', async (socket) => {
     if (activeRound) socket.emit('game:state', JSON.parse(activeRound));
   }
   socket.on('screen:heartbeat', async (payload = {}) => {
-    await redis.hSet(`screen:${venueId}`, { socketId: socket.id, lastSeenAt: new Date().toISOString(), status: 'online', currentGame: String(payload.currentGame ?? '') });
-    await redis.expire(`screen:${venueId}`, 45);
+    const heartbeat={ socketId: socket.id, lastSeenAt: new Date().toISOString(), status: 'online', currentGame: String(payload.currentGame ?? ''), phase:String(payload.phase??'') };
+    await redis.hSet(`screen:${venueId}`, heartbeat); await redis.expire(`screen:${venueId}`,45);
+    if(venueDbId&&venueDbId!==venueId){await redis.hSet(`screen:${venueDbId}`,heartbeat);await redis.expire(`screen:${venueDbId}`,45);}
   });
   socket.on('game:state', async (payload) => {
     if (!socket.data.isScreen || !payload?.roundId || !payload?.gameId) return;
-    await redis.set(`round:${venueId}`, JSON.stringify(payload), { EX: 120 });
-    socket.to(`venue:${venueId}`).emit('game:state', payload);
+    const state={...payload,payload:{...payload.payload}};
+    if(state.gameId==='plinko'&&!state.payload.path){const seed=Math.floor(Math.random()*2147483647);state.payload.seed=seed;state.payload.path=plinkoPath(seed,8);state.payload.outcomes=Array.from({length:7},(_,drop)=>Math.max(0,Math.min(6,drop+plinkoPath(seed+drop*101,8).reduce((sum:number,step:number)=>sum+step,0)/2)));}
+    if(venueDbId&&state.phase==='play'){const created=await pool.query('insert into game_sessions(venue_id,game_id,category_id,state,starts_at,ends_at,phase) values($1,$2,$3,$4,to_timestamp($5/1000.0),to_timestamp($6/1000.0),$7) returning id',[venueDbId,state.gameId,state.categoryId??null,state,state.startedAt,state.endsAt,state.phase]);state.sessionId=created.rows[0].id;}
+    await redis.set(`round:${venueId}`, JSON.stringify(state), { EX: 180 });
+    io.to(`venue:${venueId}`).emit('game:state', state);
   });
-  socket.on('game:input', (payload) => io.to(`screen:${venueId}`).emit('game:input', { ...payload, receivedAt: Date.now() }));
+  socket.on('game:input', async (payload) => { const raw=await redis.get(`round:${venueId}`); if(!raw)return; const state=JSON.parse(raw); if(state.phase!=='play'||payload.roundId!==state.roundId)return; const receivedAt=Date.now(); const score=scoreGame(state,{...payload,receivedAt}); const result={...payload,receivedAt,score}; if(state.sessionId&&payload.playerId){await pool.query(`insert into game_entries(game_session_id,player_session_id,username,score,payload) values($1,$2,$3,$4,$5) on conflict(game_session_id,player_session_id) do nothing`,[state.sessionId,payload.playerId,payload.username,score,payload]).catch(error=>console.error('Could not persist game entry',error));} io.to(`screen:${venueId}`).emit('game:input',result); socket.emit('game:accepted',{roundId:state.roundId,score}); });
   socket.on('disconnect', () => io.to(`venue:${venueId}`).emit('screen:status', { status: 'offline' }));
 });
 

@@ -6,7 +6,8 @@
   "scripts": {
     "build": "npm run build -w @freepour/games && npm run build -w @freepour/api && npm run build -w @freepour/web",
     "dev": "concurrently \"npm run dev -w @freepour/api\" \"npm run dev -w @freepour/web\"",
-    "typecheck": "npm run build -w @freepour/games && npm run typecheck -w @freepour/api && npm run typecheck -w @freepour/web"
+    "typecheck": "npm run build -w @freepour/games && npm run typecheck -w @freepour/api && npm run typecheck -w @freepour/web",
+    "test": "npm test -w @freepour/games"
   },
   "devDependencies": { "concurrently": "^9.2.0", "typescript": "^5.9.2" },
   "engines": { "node": ">=22" }
