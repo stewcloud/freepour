@@ -17,7 +17,7 @@ export const gameCatalog: GamePlugin[] = [
 export const getGame = (id: string) => gameCatalog.find(game => game.id === id);
 export function scoreGame(state: ScoringState, input: ScoringInput): number {
   if (state.gameId === 'quick-draw') return !input.receivedAt || input.receivedAt < Number(state.actionAt) ? 0 : Math.max(0, 1000 - (input.receivedAt - Number(state.actionAt)));
-  if (state.gameId === 'perfect-pour') { const value = Number(input.value); return value > 100 || value < 0 ? 0 : Math.round(value * 10); }
+  if (state.gameId === 'perfect-pour') { const value = Number(input.value),target=Number(state.payload.targetPercent??100); return value > target || value < 0 ? 0 : Math.round((value/target)*1000); }
   if (state.gameId === 'higher-or-lower') { const correct = state.payload.next.rank > state.payload.current.rank ? 'higher' : 'lower'; return input.action === correct ? 1000 : 0; }
   if (state.gameId === 'trivia') return Number(input.value) === state.payload.correct ? 1000 : 0;
   if (state.gameId === 'plinko') { const drop=Number(input.value),slot=Number(state.payload.outcomes?.[drop]??drop); return Number(state.payload.slots?.[slot] ?? 0); }
