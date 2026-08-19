@@ -123,7 +123,10 @@ app.post('/api/admin/venues', auth, async (req, res) => {
 app.delete('/api/admin/venues/:venueId', auth, async (req, res) => {
   const claims=res.locals.user as Claims;
   if(claims.role!=='platform_admin'&&!['owner','admin'].includes(claims.accountRole??''))return res.status(403).json({error:'account_admin_required'});
-  const deleted=await pool.query('delete from venues where id=$1 and ($2::boolean or account_id=$3) returning id,name,account_id',[req.params.venueId,claims.role==='platform_admin',claims.accountId??null]);
+  const venue=await pool.query('select id,slug from venues where id=$1 and ($2::boolean or account_id=$3)',[req.params.venueId,claims.role==='platform_admin',claims.accountId??null]);
+  if(!venue.rows[0])return res.status(404).json({error:'venue_not_found'});
+  if(venue.rows[0].slug==='demo')return res.status(409).json({error:'demo_venue_protected'});
+  const deleted=await pool.query('delete from venues where id=$1 returning id,name,account_id',[req.params.venueId]);
   if(!deleted.rows[0])return res.status(404).json({error:'venue_not_found'});
   await redis.del(`screen:${req.params.venueId}`);
   res.json({deleted:true,venue:deleted.rows[0]});
