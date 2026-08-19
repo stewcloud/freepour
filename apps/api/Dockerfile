@@ -15,5 +15,5 @@ COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/apps/api/dist ./apps/api/dist
 COPY --from=build /app/packages/games ./packages/games
 COPY migrations ./migrations
-CMD ["node", "apps/api/dist/index.js"]
-
+COPY scripts ./scripts
+CMD ["sh", "-c", "node scripts/migrate.mjs && node apps/api/dist/index.js"]
